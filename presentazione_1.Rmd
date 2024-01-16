@@ -1,0 +1,506 @@
+---
+title: "progetto_basket"
+output:
+  pdf_document: default
+  html_document: default
+date: "2023-02-06"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=F,include=FALSE,results=FALSE}
+library(readr)
+library(tidyverse)
+library(R2jags)
+games <- read_csv("games.csv")
+teams <- read_csv("teams.csv")
+games<- merge(games, teams, by.x  ="HOME_TEAM_ID",by.y = "TEAM_ID")
+games<- merge(games, teams, by.x="VISITOR_TEAM_ID",by.y="TEAM_ID")
+games1 <-games[games$GAME_DATE_EST>"2018-10-15" &games$GAME_DATE_EST<"2019-4-11",]
+dat <- games1[,-c(22:24,26:34,35:37,39:47)]
+playoff_games <- games[games$GAME_DATE_EST>"2019-4-12" &games$GAME_DATE_EST<"2019-6-14",]
+playoff_games <- playoff_games[,-c(22:24,26:34,35:37,39:47)]
+```
+
+```{r, echo=F}
+head(dat[,c(8,15,22,23)])
+```
+This is a view of variables that we are considered in this analysis, in fact we construct a bayesian hierarchical model, inspired by "Bayesian Hierarchical Model prediction of football results" of Gianluca Baio e Marta A. Biangiardo, that considered points of a basketball matches instead of goals in football matches
+
+The regular season is composed by 41 home games and 41 away games for 30 teams and for each match we collect the points for home and away team with $(Y_{g_{1}},Y_{g_{2}})$ with g=1,2,..,1230 and they are distributed as a poisson:
+
+$Y_{g_{i}}|{\theta_{g_{i}}} \sim Poisson(\theta_{g_{i}})$ for i=1,2.
+The estimation of $\theta$ is derived by a log-linear random effect model as follows:
+
+$\log(\theta_{g_{1}})=intercepthome+att_{h(g)}+def_{a(g)}$
+
+$\log(\theta_{g_{2}})=interceptaway+att_{a(g)}+def_{h(g)}$
+
+Since with i=1 we indicate home scoring parameter and with i=2 away scoring, this model uses attack of home team and defense of away team for home team and away team attack and defense of home team.
+
+We study the effect of variable $home$ as the difference between the two intercepts, we modelled them with un uninformative prior (N(0,0.0001)).
+This model follows structure of Karlis & Ntzoufras 2003, but, since scale of $Y_{i}$ are so different, we obtain different results in practice.
+Attack and defense effect for team are modelled as normal:
+
+$att\sim N(\mu_{att},\tau_{att})$
+
+$def\sim N(\mu_{def},\tau_{def})$
+
+According to Karlis & Ntzoufras 2003, to achieve identifiability of parameters, we need to impose that sum of attack strength and sum of defense strength must be 0; that's useful also for analysis, since we can divide teams in good offense team if att is positive and bad offense if att is negative and this is valid also for defense.
+Hyper-priors of parameters were modelled as flat in this way:
+
+$\mu_{att}\sim N(0,0.0001)$
+
+$\tau_{att}\sim \Gamma(0.1,0.1)$
+
+$\mu_{def}\sim N(0,0.0001)$   
+
+$\tau_{def}\sim \Gamma(0.1,0.1)$
+
+So we find initial values for attack and defense strength.
+
+```{r, echo=F}
+dat <- dat %>% arrange(dat$ABBREVIATION.x)
+dat$elenco_home <- rep(c(1:30), each=41)
+dat <- dat %>% arrange(dat$ABBREVIATION.y)
+dat$elenco_away <- rep(c(1:30), each=41) 
+dat <- dat %>% arrange(dat$ABBREVIATION.x)
+Y <- list()
+team_home <- unique(factor(dat$ABBREVIATION.x))
+ybar<-ymed<-sv<-rep(0,30)
+for (i in 1:30){
+  Y[[i]] <- c(dat$PTS_home[team_home[i]==dat$ABBREVIATION.x],dat$PTS_away[team_home[i]==dat$ABBREVIATION.y])
+  ybar[i]<-round(mean(Y[[i]]),0)
+  ymed[i]<-median(Y[[i]])
+  sv[i]<-var(Y[[i]])
+  
+}
+att_1 <- att_star <- grp_att <- rep(0, times=30)
+p_att <- matrix(0, nrow=30, ncol=3)
+for (i in 1:length(att_1)){
+  att_star[i] <- ybar[i]
+  att_1[i] <- ybar[i]-mean(ybar)
+}
+tab <- list()
+for (i in 1:30){
+  tab[[i]] <- table((Y[[i]]>=(mean(att_star)+sd(att_star))),(Y[[i]]<=(mean(att_star)-sd(att_star))))
+  p_att[i,] <- c(tab[[i]][3]/82,tab[[i]][1]/82,tab[[i]][2]/82)
+}
+###COEFFICIENTE DEF
+Y_d <- list()
+team_away <- unique(factor(dat$ABBREVIATION.x))
+ybar_d<-ymed_d<-sv_d<-rep(0,30)
+for (i in 1:30){
+  Y_d[[i]] <- c(dat$PTS_away[team_away[i]==dat$ABBREVIATION.x],dat$PTS_home[team_away[i]==dat$ABBREVIATION.y])
+  ybar_d[i]<-round(mean(Y_d[[i]]),0)
+  ymed_d[i]<-median(Y_d[[i]])
+  sv_d[i]<-var(Y_d[[i]])
+  
+}
+def_1 <- def_star <- grp_def <-  rep(0, times=30)
+p_def <- matrix(0, nrow=30,ncol = 3)
+
+for (i in 1:length(att_1)){
+  def_star[i] <- ybar_d[i]
+  def_1[i] <- ybar_d[i]-mean(ybar_d)
+}
+for (i in 1:30){
+  tab[[i]] <- table((Y_d[[i]]>=(mean(def_star)+sd(def_star))),(Y_d[[i]]<=(mean(def_star)-sd(def_star))))
+  p_def[i,] <- c(tab[[i]][2]/82,tab[[i]][1]/82,tab[[i]][3]/82)
+}
+```
+
+```{r, echo=F}
+par(mfrow=c(1,1))
+plot(c(1,30),range(Y) ,type="n",ylab="Points",xlab="Teams", main="Points made for each match")
+axis(1, at=1:30, labels = names(table(sort(team_home))), las =2)
+for(l in 1:30)  {
+  points( rep(l,82), Y[[l]],pch=16,cex=.6 )
+  points( l, ybar[l],pch=16,cex=1,col=2 )
+  segments( l,min(Y[[l]]),l,max(Y[[l]]))
+}
+abline(h=mean(ybar))
+```
+
+We can notice that points made distribution for teams is, excluded for "DET" and "ATL" that have one observation around 160 and for "UTA" that has one observation around 70, defined in interval around 80 and 120 for almost all values and mean of each team is closed to mean of all teams, so we can assume that variance is constant across groups for team offense.
+
+```{r, echo=F}
+par(mfrow=c(1,1))
+plot(c(1,30),range(Y_d) ,type="n",ylab="Points",xlab="Teams", main="Points conceded for each match")
+axis(1, at=1:30, labels = names(table(sort(team_home))), las =2)
+for(l in 1:30)  {
+  points( rep(l,82), Y_d[[l]],pch=16,cex=.6 )
+  points( l, ybar_d[l],pch=16,cex=1,col=2 )
+  segments( l,min(Y_d[[l]]),l,max(Y_d[[l]]))
+}
+abline(h=mean(ybar_d))
+```
+
+For points conceded we can do the same comment, in fact all of means for teams are closed to mean of all teams and, always excludeed 3 observations, almost all values are around between 80 and 120.
+
+To estimate model we use this Jags code and our goal is to find posterior distribution for attack and defense strength and for the intercepts.
+
+```{r, results=FALSE}
+cat("model {
+# LIKELIHOOD AND RANDOM EFFECT MODEL FOR THE SCORING PROPENSITY
+for (g in 1:1230) {
+# Observed number of points scored by each team
+y1[g] ~ dpois(theta[g,1])
+y2[g] ~ dpois(theta[g,2])
+# Average Scoring intensities
+log(theta[g,1]) <- intercepthome+att[hometeam[g]] + def[awayteam[g]]
+log(theta[g,2]) <- interceptaway+att[awayteam[g]] + def[hometeam[g]]
+}
+# 1. BASIC MODEL FOR THE HYPERPARAMETERS
+##prior on intercept
+intercepthome~ dnorm(0,0.0001)
+interceptaway~ dnorm(0,0.0001)
+# prior on the home effect
+home ~ dnorm(0,0.0001)
+# Trick to code the ‘‘sum-to-zero’’ constraint
+for (t in 1:30){
+att.star[t] ~ dnorm(mu.att,tau.att)
+def.star[t] ~ dnorm(mu.def,tau.def)
+att[t] <- att.star[t] - mean(att.star[])
+def[t] <- def.star[t] - mean(def.star[])
+}
+# priors on the random effects
+mu.att ~ dnorm(0,0.0001)
+mu.def ~ dnorm(0,0.0001)
+tau.att ~ dgamma(.01,.01)
+tau.def ~ dgamma(.01,.01)}",file="basket_model.txt", fill=TRUE)
+```
+
+```{r,echo=FALSE,results=FALSE}
+data.input <- list(y1=dat$PTS_home,y2=dat$PTS_away,hometeam=dat$elenco_home, awayteam=dat$elenco_away)
+parameters <- c(paste("att[", i= 1:30,"]", sep =""), paste("def[", i= 1:30,"]", sep =""),
+                "intercepthome","interceptaway")
+inits <- function(){list("att.star" = att_star,
+                         "def.star" = def_star)}
+prova_model=jags(data=data.input,inits=inits,
+                 parameters.to.save=parameters,
+                 model.file="basket_model.txt",
+                 DIC=TRUE,n.chains=2,n.iter=1000,n.burnin=100,n.thin=1)
+
+```
+
+In the initial values i select "att.star" and "def.star" to construct 0 bond for att and def, in fact estimation of these posteriors are derived by the difference between "att.star" for each team and mean of "att.star" for all team, so sum of all "att" and "def" must be 0.
+In input we include only points for each match of two teams and list of numbers that equals to home and away team, we want to estimate posterior for "att" and "def" and the two intercepts.
+
+```{r,echo=FALSE}
+print(prova_model$BUGSoutput, digits=3)
+```
+
+From this output we can notice that almost all parameters converge, in fact Rhat tends to 1 and the effective sample size of almost all parameters are 1800, since i simulate 2 chains of 1000 simulations with a burnin of 100.
+Rhat coefficient consider asymptotic behaviour of ratio between and within variance for the corresponding estimator and for the overall estimator of the chain.  
+Also the pD, that represents the effective number of parameters of the model, suggests to us that the model perform well, since we are estimated 62 parameters and pD is 56.6.
+
+The first aspect that we want to analyze is the home factor, in fact is reasonable that playing home tends to increase the probability to realize more points than opponent and therefore to win the match.
+
+Since we estimate two intercepts, the effect of home is given by the difference of 1800 estimations of intercepts and we want to verify that this effect is different to zero.
+
+```{r,echo=FALSE}
+home <- prova_model$BUGSoutput$sims.list$intercepthome-prova_model$BUGSoutput$sims.list$interceptaway
+hist(home, prob=T, main="histogram of differential home factor")
+curve(dnorm(x, mean=mean(home), sd=sd(home)), add=T, col="red")
+```
+
+Home histogram shows clearly that this posterior distribution tends to a normal, in fact red line that overlaps graph is the the normal density with mean and standard deviation of differential home factor distribution obtained by difference.
+We want to confirm that this effect is different to zero, so we construct the HPD for level=0.95:
+
+```{r, echo=F}
+which_decreas_ord=order(home,decreasing=TRUE)
+temp_min=min(which(cumsum(home[which_decreas_ord])>=0.99))
+HPD=sort(which_decreas_ord[1:temp_min])-1
+HPDlower=min(HPD)
+HPDupper=max(HPD)
+```
+
+```{r,echo=FALSE}
+c(sort(home)[165],sort(home)[1726])
+```
+
+
+Zero is not in this interval, so posterior home is different from zero for $\alpha=0.95$
+
+
+Another important features of model are posterior estimations for attack and defense by team;
+as in the article of Benjamin Etienne "Bayesian Basketball : was Toronto really the best team during NBA 2019 season ?",
+we put attack on x-axis and defense on y-axis but for defense, as in the blog, I use negative value since in the estimation less values of defense are associated with good defense.
+
+
+```{r, echo=F}
+team_home <- team_home[c(10:19,1,20:29,2,30,3:9)]
+att_strength <- colMeans(prova_model$BUGSoutput$sims.list$att)
+def_strength <- colMeans(prova_model$BUGSoutput$sims.list$def)
+posterior_for_teams <- matrix(c(att_strength,-def_strength),nrow=30,ncol=2)
+rownames(posterior_for_teams) <- team_home
+colnames(posterior_for_teams) <- c("ATT STRENGTH","DEF STRENGTH")
+#per ottenere un grafico quadrato
+playoff_in <- c()
+playoff_teams <- sort(unique(playoff_games$ABBREVIATION.x))
+for (i in 1:30){
+  playoff_in[i] <- ifelse(team_home[i] %in% playoff_teams,1,0)
+}
+col1 <- ifelse(playoff_in==1,"blue","red")
+plot(posterior_for_teams[,1:2],xlab="Att_strength",ylab="Def_strength",type="n")
+etich=abbreviate(row.names(posterior_for_teams[,1:2]),minlength=3)
+text(posterior_for_teams[,1], posterior_for_teams[,2],labels=etich, cex=0.6,col=col1)
+abline(h=0,v=0,lty=2,lwd=1.5)
+abline(a=0,b=-1)
+legend(x="topright",lwd=1,cex=0.6,col=c("blue","red"),legend = c("playoff_in","playoff_out"))
+```
+
+It's interesting to notice that only the teams, excluded "DET", that was qualified by next part of season are in the right part of line with intercept=0 and slope=-1, so a conclusion can be that it's not enough to develop only one of two games phases to win matches and to qualify for playoff.
+
+
+```{r,echo=F, results=FALSE}
+lambda_intercepthome_mean <- mean(prova_model$BUGSoutput$sims.list$intercepthome)
+lambda_intercepthome_sd <- sd(prova_model$BUGSoutput$sims.list$intercepthome)
+lambda_interceptaway_mean <- mean(prova_model$BUGSoutput$sims.list$interceptaway)
+lambda_interceptaway_sd <- sd(prova_model$BUGSoutput$sims.list$interceptaway)
+attack_sd <- apply(prova_model$BUGSoutput$sims.list$att,MARGIN=2,FUN=sd)
+defense_sd <- apply(prova_model$BUGSoutput$sims.list$def,MARGIN=2,FUN=sd)
+#library(ggmcmc)
+#p <- ggs(as.mcmc(prova_model))
+#ggmcmc(p)
+```
+
+##COMMENTS ABOUT MODEL CONSTRUCTED WITH GGMCMC
+Since we are estimate 2 chains we can see that behavior of two chains for all the parametrs are so similar, infact blue and pink curves are so closed and sometimes they are overlapped.
+We can see the absence of autocorrelation with scatter lines plot of two chain and from acf plot of all parameters, in fact if we construct a bound for autocorrelation around 0.25, we see that all acf plots are inside bounded region.
+Also the running means validate model in fact, for both chain, after some iterations means became stable around a value.
+It's interesting analysis of Geweke's diagnostics, in fact this tool takes the first 10% of the chain for each parameter and last 50% of chains, if the means of this sub-distribution equal, distributions are stationary and Geweke statistics has an asymptotically standard normal distribution.
+In the representation we have that, for two chains, almost all statistics are in 95% confidence interval so distributions are stationary.
+
+
+
+The next step is the evaluation of prediction of season:
+
+knowing that prior of $Y_{g_{1}}$ is a poisson of $\theta_{g_{1}}$ and the same for $Y_{g_{2}}$,prediction of match can be obtained to sample a poisson with posterior values for thetas, that can be calculated sampling with posterior values for intercepts and attack and defense strength for team of match.
+I simulate 1000 regular seasons with 41 home and 41 away matches for each team and for each regular season i sample new values for posterior intercepts, attack and defense effect given the posterior distributions.
+
+```{r, echo=F}
+y1 <- c()
+y2 <- c()
+win_list <- array(888, dim =c(30,1,1000))
+win_predictive <- rep(0, times=30)
+real_win <- rep(0, times=30)
+dat <- dat %>% arrange(FG3_PCT_home)
+for (t in 1:1000){
+  lambda_intercepthome <- rnorm(1, mean = lambda_intercepthome_mean, sd=lambda_intercepthome_sd)
+  lambda_interceptaway <- rnorm(1, mean = lambda_interceptaway_mean, sd=lambda_interceptaway_sd)
+  att_sample <- rnorm(30, mean=att_strength, sd=attack_sd)
+  def_sample <- rnorm(30, mean=def_strength, sd=defense_sd)
+  for (i in 1:1230){
+    y1[i] <- rpois(1, lambda = exp(lambda_intercepthome+att_sample[dat$elenco_home[i]]+def_sample[dat$elenco_away[i]]))
+    y2[i] <- rpois(1, lambda = exp(lambda_interceptaway+att_sample[dat$elenco_away[i]]+def_sample[dat$elenco_home[i]]))
+    if (y1[i]>=y2[i]){
+      win_predictive[dat$elenco_home[i]] <- win_predictive[dat$elenco_home[i]]+1
+    }else{
+      win_predictive[dat$elenco_away[i]] <- win_predictive[dat$elenco_away[i]]+1
+    }
+  }
+  win_list[,1,t] <- win_predictive
+  win_predictive <- rep(0, times=30)
+}
+
+win_for_team <- c()
+for (i in 1:1230){
+  if(dat$PTS_home[i]>=dat$PTS_away[i]){
+    real_win[dat$elenco_home[i]] <- real_win[dat$elenco_home[i]]+1
+  }else{
+    real_win[dat$elenco_away[i]] <- real_win[dat$elenco_away[i]]+1
+  } 
+}
+win_for_team <- apply(win_list[1:30,,], MARGIN = 1,FUN=mean)
+win_for_team <- win_for_team[order(team_home)]
+win_match <-matrix(c(win_for_team,real_win),nrow=30, ncol=2)
+rownames(win_match) <- team_home[order(team_home)]
+win_match
+plot(1:30,win_match[,1], type='h', ylim = c(0,60), xaxt="n", xlab ="Teams", ylab="Win Games", lwd =2, main="Model prediction")
+points((1:30)+0.2,win_match[,2], type = 'h', col ='red', lwd=2)
+axis(1, at=1:30, labels = names(table(team_home)), las =2)
+legend(x="topleft",lwd=1,cex=0.6,col=c("black","red"),legend=c("predictive","real_win"))
+```
+
+Predictions are good and for the majority of teams is so closed to the real result, but we can notice that, as was expected, there is shrinkage effect given by hierarchical structure:
+teams with less real win has more win in the prediction and teams with more victories has less win in the prediction.
+
+```{r, echo=FALSE}
+par(mfrow=c(1,1))
+win_list <- win_list[order(team_home),1,]
+plot(c(1,30),range(win_list[1:30,]) ,type="n",ylab="Wins",xlab="Teams", main="Wingames for each simulated regular season")
+axis(1, at=1:30, labels = names(table(team_home)), las =2)
+for(l in 1:30)  {
+  points( rep(l,1000), win_list[l,],pch=16,cex=.6 )
+  points( l, win_for_team[l],pch=16,cex=1,col=2 )
+  segments( l,min(win_list[l,]),l,max(win_list[l,]))
+}
+```
+
+We can see that for 1000 regular seasons number of wins has big variability, but also we can see that range for almost of all teams are closed.
+Pink points represents the mean of wins of 1000 predictions and this is the number that i used to compare predictions with real result in previous graph.
+
+
+
+To avoid over-shrinkage effect, as in the "Bayesian hierarchical model for the prediction of
+football results", we try to divide attack and defense in 3 groups, that are top, mid and bottom.
+we estimate probability to belong on a group considering all of matches:
+
+if the points in a match for a team are bigger than mean of attack effect plus standard deviation this observation contributes to probability that this teams belongs to top group, if points are smaller than mean of attack strength minus standard deviation, this contributes to prob that team is in bottom group, else this team belongs to mid group and similarly i do for defense.
+So the structure of model changes, since there are 3 difference distributions for $\mu_{att}$ and $\mu_{def}$, and this was approximated with a truncated normal distribution with cutoff=2.
+Prior probability to belong of a team is modelled as a Dirichelet distribution.
+
+```{r, results=FALSE}
+cat("model {
+# LIKELIHOOD AND RANDOM EFFECT MODEL FOR THE SCORING PROPENSITY
+for (g in 1:1230) {
+# Observed number of goals scored by each team
+y1[g] ~ dpois(theta[g,1])
+y2[g] ~ dpois(theta[g,2])
+# Average Scoring intensities (accounting for mixing components)
+log(theta[g,1]) <- intercepthome + att[hometeam[g]] + def[awayteam[g]]
+log(theta[g,2]) <- interceptaway+att[awayteam[g]] + def[hometeam[g]]
+}
+# 2. MIXTURE MODEL FOR THE HYPERPARAMETERS
+# prior on the home effect
+intercepthome ~ dnorm(0,0.0001)
+interceptaway ~ dnorm(0,0.0001)
+# Mixture parameters & components (‘‘sum-to-zero’’ constraint)
+for (t in 1:30){
+grp.att[t] ~ dcat(p.att[t,])
+grp.def[t] ~ dcat(p.def[t,])
+att.star[t] ~ dt(mu.att[grp.att[t]],tau.att[grp.att[t]],4)
+def.star[t] ~ dt(mu.def[grp.def[t]],tau.def[grp.def[t]],4)
+att[t] <- att.star[t] - mean(att.star[])
+def[t] <- def.star[t] - mean(def.star[])
+# Priors on the mixture parameter (team specific)
+p.att[t,1:3] ~ ddirch(prior.att[t,])
+p.def[t,1:3] ~ ddirch(prior.def[t,])
+}
+# Priors on the random effects
+# group 1: bottom-table teams
+mu.att[1] ~ dnorm(0,0.001) T(109,111)
+mu.def[1] ~ dnorm(0,0.001) T(111,113)
+tau.att[1] ~ dgamma(0.01,0.01)
+tau.def[1] ~ dgamma(0.01,0.01)
+# group 2: mid-table teams
+mu.att[2] <- 111
+mu.def[2] <- 111
+tau.att[2] ~ dgamma(0.01,0.01)
+tau.def[2] ~ dgamma(0.01,0.01)
+# group 3: top-table teams
+mu.att[3] ~ dnorm(0,0.001) T(111,113)
+mu.def[3] ~ dnorm(0,0.001) T(109,111)
+tau.att[3] ~ dgamma(0.01,0.01)
+tau.def[3] ~ dgamma(0.01,0.01)
+}", file="basket_model_2.txt", fill=T)
+```
+
+
+```{r,echo=F, results=FALSE}
+data.input <- list(y1=dat$PTS_home,y2=dat$PTS_away,hometeam=dat$elenco_home, awayteam=dat$elenco_away,prior.att=p_att,prior.def=p_def)
+parameters <- c(paste("att[", i= 1:30,"]", sep =""), paste("def[", i= 1:30,"]", sep =""),
+                "intercepthome","interceptaway",
+                "p.att","p.def")
+inits <- function(){list("att.star" = att_star,
+                         "def.star" = def_star)}
+prova_model_2=jags(data=data.input,inits=inits,
+                   parameters.to.save=parameters,
+                   model.file="basket_model_2.txt",
+                   DIC=TRUE,n.chains=2,n.iter=1000,n.burnin=100,n.thin=1)
+
+```
+
+
+In this model we estimate also the posterior probability that each team is in each group and that's be useful to understand difference between teams.
+The principal aspect that we want to investigate is prediction of this models, in fact, as in example in previous cited article, this setup should be reduced over-shrinkage effect.
+
+```{r,echo=FALSE}
+att_strength <- colMeans(prova_model_2$BUGSoutput$sims.list$att)
+def_strength <- colMeans(prova_model_2$BUGSoutput$sims.list$def)
+posterior_for_teams <- matrix(c(att_strength,-def_strength),nrow=30,ncol=2)
+rownames(posterior_for_teams) <- team_home
+colnames(posterior_for_teams) <- c("ATT STRENGTH","DEF STRENGTH")
+lambda_intercepthome_mean <- mean(prova_model_2$BUGSoutput$sims.list$intercepthome)
+lambda_intercepthome_sd <- sd(prova_model_2$BUGSoutput$sims.list$intercepthome)
+lambda_interceptaway_mean <- mean(prova_model_2$BUGSoutput$sims.list$interceptaway)
+lambda_interceptaway_sd <- sd(prova_model_2$BUGSoutput$sims.list$interceptaway)
+attack_sd <- apply(prova_model_2$BUGSoutput$sims.list$att,MARGIN=2,FUN=sd)
+defense_sd <- apply(prova_model_2$BUGSoutput$sims.list$def,MARGIN=2,FUN=sd)
+y1 <- c()
+y2 <- c()
+win_list <- array(888, dim =c(30,1,1000))
+win_predictive <- rep(0, times=30)
+real_win <- rep(0, times=30)
+for (t in 1:1000){
+  lambda_intercepthome <- rnorm(1, mean = lambda_intercepthome_mean, sd=lambda_intercepthome_sd)
+  lambda_interceptaway <- rnorm(1, mean = lambda_interceptaway_mean, sd=lambda_interceptaway_sd)
+  att_sample <- rnorm(30, mean=att_strength, sd=attack_sd)
+  def_sample <- rnorm(30, mean=def_strength, sd=defense_sd)
+  for (i in 1:1230){
+    y1[i] <- rpois(1, lambda = exp(lambda_intercepthome+att_sample[dat$elenco_home[i]]+def_sample[dat$elenco_away[i]]))
+    y2[i] <- rpois(1, lambda = exp(lambda_interceptaway+att_sample[dat$elenco_away[i]]+def_sample[dat$elenco_home[i]]))
+    if (y1[i]>=y2[i]){
+      win_predictive[dat$elenco_home[i]] <- win_predictive[dat$elenco_home[i]]+1
+    }else{
+      win_predictive[dat$elenco_away[i]] <- win_predictive[dat$elenco_away[i]]+1
+    }
+  }
+  win_list[,1,t] <- win_predictive
+  win_predictive <- rep(0, times=30)
+}
+
+
+win_for_team <- c()
+for (i in 1:1230){
+  if(dat$PTS_home[i]>=dat$PTS_away[i]){
+    real_win[dat$elenco_home[i]] <- real_win[dat$elenco_home[i]]+1
+  }else{
+    real_win[dat$elenco_away[i]] <- real_win[dat$elenco_away[i]]+1
+  } 
+}
+win_for_team <- apply(win_list[1:30,,], MARGIN = 1,FUN=median)
+win_for_team <- win_for_team[order(team_home)]
+win_match <-matrix(c(win_for_team,real_win),nrow=30, ncol=2)
+rownames(win_match) <- team_home[order(team_home)]
+plot(1:30,win_match[,1], type='h', ylim = c(0,60), xaxt="n", xlab ="Teams", ylab="Win games", lwd =2,main="Mixture model prediction")
+points((1:30)+0.2,win_match[,2], type = 'h', col ='red', lwd=2)
+axis(1, at=1:30, labels = names(table(team_home)), las =2)
+legend(x="topleft",lwd=1,cex=0.4,col=c("black","red"),legend=c("predictive","real_win"))
+```
+
+We can see that for small teams win prediction is smaller and for big teams is higher, but there are not big change and over-shrinkage effect isn't reduced.
+So we want to verify if the model recognize well division structure by group with comparison between posterior probabilities and posterior strength for each team.
+
+```{r,echo=FALSE}
+#####posterior probability of each team belong to each category
+posterior_probability <- c(colMeans(prova_model_2$BUGSoutput$sims.list$p.att))
+posterior_probability_for_teams_offense <- matrix(0, nrow=30,ncol=3)
+posterior_probability_for_teams_offense[1:30,] <- c(posterior_probability[1:30],posterior_probability[31:60],posterior_probability[61:90])
+posterior_probability <- c(colMeans(prova_model_2$BUGSoutput$sims.list$p.def))
+posterior_probability_for_teams_defense <- matrix(0, nrow=30,ncol=3)
+posterior_probability_for_teams_defense[1:30,] <- c(posterior_probability[1:30],posterior_probability[31:60],posterior_probability[61:90])
+prob <- matrix(c(posterior_probability_for_teams_offense,posterior_probability_for_teams_defense),nrow=30,ncol=6)
+rownames(prob) <- sort(team_home)
+colnames(prob) <- c("B_A","M_A","T_A","B_D","M_D","T_D")
+prob
+```
+
+Posterior probability represents probability that each team belongs on one of three groups for offense and defense and, to ensure their validity, I compare with graphical of attack and defense strength for each team to understand if model performs well in group division.
+In fact we estimate, for each match, probability that each team belongs to a group and posterior says to us that model recognize well case of bad and top defense, in fact teams that has bad defense for all season have higher percentage for bad defense group and same for attack effect.
+The critical aspect of this model is that he cannot recognize well mid performance, in fact, since we don't use a normal truncated but only a value for mid group, the model tends to assign observation or in first or in third class.
+
+```{r,echo=FALSE}
+col1 <- ifelse(playoff_in==1,"blue","red")
+plot(posterior_for_teams[,1:2],xlab="Att_strength",ylab="Def_strength",type="n")
+etich=abbreviate(row.names(posterior_for_teams[,1:2]),minlength=3)
+text(posterior_for_teams[,1], posterior_for_teams[,2],labels=etich, cex=0.6,col=col1)
+abline(h=0,v=0,lty=2,lwd=1.5)
+abline(a=0,b=-1)
+legend(x="topright",lwd=1,cex=0.6,col=c("blue","red"),legend = c("playoff_in","playoff_out"))
+
+```
